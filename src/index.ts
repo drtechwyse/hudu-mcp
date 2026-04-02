@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 /**
  * HUDU MCP Server
  *
@@ -24,44 +23,39 @@
  * SOFTWARE.
  */
 
+import https from 'node:https';
+import fs from 'node:fs';
+import express, { type Request, type Response } from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+
 import { HuduClient } from './hudu-client.js';
 import { registerTools } from './tools/index.js';
 
-// Configuration schema
 const ConfigSchema = z.object({
   HUDU_API_KEY: z.string().min(1, 'HUDU_API_KEY is required'),
   HUDU_BASE_URL: z.string().url('HUDU_BASE_URL must be a valid URL'),
+  PORT: z.coerce.number().int().positive().default(3000),
+  HOST: z.string().default('0.0.0.0'),
+  SSL_KEY_PATH: z.string().optional(),
+  SSL_CERT_PATH: z.string().optional(),
+  MCP_AUTH_TOKEN: z.string().min(1, 'MCP_AUTH_TOKEN is required'),
 });
 
 type Config = z.infer<typeof ConfigSchema>;
 
 class HuduMcpServer {
-  private server: Server;
-  private huduClient: HuduClient;
-  private config: Config;
+  private readonly huduClient: HuduClient;
+  private readonly config: Config;
 
   constructor() {
-    this.server = new Server(
-      {
-        name: 'hudu-mcp',
-        version: '1.0.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
-    // Initialize HUDU client
     this.config = this.loadConfig();
-    this.huduClient = new HuduClient(this.config.HUDU_API_KEY, this.config.HUDU_BASE_URL);
-
-    this.setupHandlers();
+    this.huduClient = new HuduClient(
+      this.config.HUDU_API_KEY,
+      this.config.HUDU_BASE_URL
+    );
   }
 
   private loadConfig(): Config {
@@ -69,6 +63,11 @@ class HuduMcpServer {
       return ConfigSchema.parse({
         HUDU_API_KEY: process.env.HUDU_API_KEY,
         HUDU_BASE_URL: process.env.HUDU_BASE_URL,
+        PORT: process.env.PORT ?? 3000,
+        HOST: process.env.HOST ?? '0.0.0.0',
+        SSL_KEY_PATH: process.env.SSL_KEY_PATH,
+        SSL_CERT_PATH: process.env.SSL_CERT_PATH,
+        MCP_AUTH_TOKEN: process.env.MCP_AUTH_TOKEN,
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -81,9 +80,20 @@ class HuduMcpServer {
     }
   }
 
-  private setupHandlers(): void {
-    // Handle tool listing
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+  private createServer(): Server {
+    const server = new Server(
+      {
+        name: 'hudu-mcp',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
           {
@@ -92,45 +102,22 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                name: {
-                  type: 'string',
-                  description: 'Filter companies by name',
-                },
-                phone_number: {
-                  type: 'string',
-                  description: 'Filter companies by phone number',
-                },
-                website: {
-                  type: 'string',
-                  description: 'Filter companies by website',
-                },
-                city: {
-                  type: 'string',
-                  description: 'Filter companies by city',
-                },
-                id_number: {
-                  type: 'string',
-                  description: 'Filter companies by ID number',
-                },
-                state: {
-                  type: 'string',
-                  description: 'Filter companies by state',
-                },
-                slug: {
-                  type: 'string',
-                  description: 'Filter companies by URL slug',
-                },
-                search: {
-                  type: 'string',
-                  description: 'Filter companies using a search query',
-                },
+                name: { type: 'string', description: 'Filter companies by name' },
+                phone_number: { type: 'string', description: 'Filter companies by phone number' },
+                website: { type: 'string', description: 'Filter companies by website' },
+                city: { type: 'string', description: 'Filter companies by city' },
+                id_number: { type: 'string', description: 'Filter companies by ID number' },
+                state: { type: 'string', description: 'Filter companies by state' },
+                slug: { type: 'string', description: 'Filter companies by URL slug' },
+                search: { type: 'string', description: 'Filter companies using a search query' },
                 id_in_integration: {
                   type: 'string',
                   description: 'Filter companies by ID/identifier in PSA/RMM/outside integration',
                 },
                 updated_at: {
                   type: 'string',
-                  description: 'Filter companies updated within a range or at an exact time. Format: "start_datetime,end_datetime" for range, "exact_datetime" for exact match',
+                  description:
+                    'Format: "start_datetime,end_datetime" for range, "exact_datetime" for exact match',
                 },
                 page: {
                   type: 'number',
@@ -154,10 +141,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'Company ID',
-                },
+                id: { type: 'number', description: 'Company ID' },
               },
               required: ['id'],
             },
@@ -168,33 +152,16 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                search: {
-                  type: 'string',
-                  description: 'Search query for articles',
-                },
-                name: {
-                  type: 'string',
-                  description: 'Filter articles by exact name match',
-                },
-                company_id: {
-                  type: 'number',
-                  description: 'Filter articles by company ID',
-                },
-                slug: {
-                  type: 'string',
-                  description: 'Filter articles by slug',
-                },
-                draft: {
-                  type: 'boolean',
-                  description: 'Filter by draft status (true for drafts, false for published)',
-                },
-                enable_sharing: {
-                  type: 'boolean',
-                  description: 'Filter by sharing status (true for shared articles)',
-                },
+                search: { type: 'string', description: 'Search query for articles' },
+                name: { type: 'string', description: 'Filter articles by exact name match' },
+                company_id: { type: 'number', description: 'Filter articles by company ID' },
+                slug: { type: 'string', description: 'Filter articles by slug' },
+                draft: { type: 'boolean', description: 'Filter by draft status' },
+                enable_sharing: { type: 'boolean', description: 'Filter by sharing status' },
                 updated_at: {
                   type: 'string',
-                  description: 'Filter by update date. Use ISO 8601 format for exact match, or "start_datetime,end_datetime" for range',
+                  description:
+                    'Use ISO 8601 format for exact match, or "start_datetime,end_datetime" for range',
                 },
                 page: {
                   type: 'number',
@@ -218,10 +185,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'Article ID',
-                },
+                id: { type: 'number', description: 'Article ID' },
               },
               required: ['id'],
             },
@@ -232,22 +196,10 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                company_id: {
-                  type: 'number',
-                  description: 'Company ID to filter assets',
-                },
-                asset_layout_id: {
-                  type: 'number',
-                  description: 'Filter by asset layout ID',
-                },
-                id: {
-                  type: 'number',
-                  description: 'Filter assets by their ID',
-                },
-                name: {
-                  type: 'string',
-                  description: 'Filter assets by their name',
-                },
+                company_id: { type: 'number', description: 'Company ID to filter assets' },
+                asset_layout_id: { type: 'number', description: 'Filter by asset layout ID' },
+                id: { type: 'number', description: 'Filter assets by their ID' },
+                name: { type: 'string', description: 'Filter assets by their name' },
                 primary_serial: {
                   type: 'string',
                   description: 'Filter assets by their primary serial number',
@@ -256,17 +208,12 @@ class HuduMcpServer {
                   type: 'boolean',
                   description: 'Set to true to display only archived assets',
                 },
-                slug: {
-                  type: 'string',
-                  description: 'Filter assets by their URL slug',
-                },
-                search: {
-                  type: 'string',
-                  description: 'Filter assets using a search query',
-                },
+                slug: { type: 'string', description: 'Filter assets by their URL slug' },
+                search: { type: 'string', description: 'Filter assets using a search query' },
                 updated_at: {
                   type: 'string',
-                  description: 'Filter assets updated within a range or at an exact time. Format: "start_datetime,end_datetime" for range, "exact_datetime" for exact match',
+                  description:
+                    'Format: "start_datetime,end_datetime" for range, "exact_datetime" for exact match',
                 },
                 page: {
                   type: 'number',
@@ -290,14 +237,8 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                company_id: {
-                  type: 'number',
-                  description: 'Company ID to filter passwords',
-                },
-                name: {
-                  type: 'string',
-                  description: 'Filter by password name',
-                },
+                company_id: { type: 'number', description: 'Company ID to filter passwords' },
+                name: { type: 'string', description: 'Filter by password name' },
                 page: {
                   type: 'number',
                   description: 'Page number for pagination',
@@ -320,29 +261,20 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                user_id: {
-                  type: 'number',
-                  description: 'Filter logs by a specific user ID',
-                },
-                user_email: {
-                  type: 'string',
-                  description: 'Filter logs by a user\'s email address',
-                },
+                user_id: { type: 'number', description: 'Filter logs by a specific user ID' },
+                user_email: { type: 'string', description: "Filter logs by a user's email address" },
                 resource_id: {
                   type: 'number',
-                  description: 'Filter logs by resource ID; must be used in conjunction with resource_type',
+                  description: 'Filter logs by resource ID; must be used with resource_type',
                 },
                 resource_type: {
                   type: 'string',
-                  description: 'Filter logs by resource type (Asset, AssetPassword, Company, Article, etc.); must be used in conjunction with resource_id',
+                  description: 'Filter logs by resource type; must be used with resource_id',
                 },
-                action_message: {
-                  type: 'string',
-                  description: 'Filter logs by the action performed',
-                },
+                action_message: { type: 'string', description: 'Filter logs by action performed' },
                 start_date: {
                   type: 'string',
-                  description: 'Filter logs starting from a specific date; must be in ISO 8601 format',
+                  description: 'Filter logs starting from a specific date in ISO 8601 format',
                 },
                 page: {
                   type: 'number',
@@ -357,10 +289,7 @@ class HuduMcpServer {
                   minimum: 1,
                   maximum: 100,
                 },
-                search: {
-                  type: 'string',
-                  description: 'Search query for activity logs',
-                },
+                search: { type: 'string', description: 'Search query for activity logs' },
               },
             },
           },
@@ -392,10 +321,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'Asset layout ID',
-                },
+                id: { type: 'number', description: 'Asset layout ID' },
               },
               required: ['id'],
             },
@@ -406,14 +332,8 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                name: {
-                  type: 'string',
-                  description: 'Filter folders by name',
-                },
-                company_id: {
-                  type: 'number',
-                  description: 'Filter folders by company ID',
-                },
+                name: { type: 'string', description: 'Filter folders by name' },
+                company_id: { type: 'number', description: 'Filter folders by company ID' },
                 in_company: {
                   type: 'boolean',
                   description: 'When true, only returns company-specific folders',
@@ -440,10 +360,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'Folder ID',
-                },
+                id: { type: 'number', description: 'Folder ID' },
               },
               required: ['id'],
             },
@@ -454,17 +371,12 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                name: {
-                  type: 'string',
-                  description: 'Filter users by name',
-                },
-                email: {
-                  type: 'string',
-                  description: 'Filter users by email address',
-                },
+                name: { type: 'string', description: 'Filter users by name' },
+                email: { type: 'string', description: 'Filter users by email address' },
                 security_level: {
                   type: 'string',
-                  description: 'Filter users by security level (super_admin, admin, spectator, editor, author, portal_member, portal_admin)',
+                  description:
+                    'Filter users by security level (super_admin, admin, spectator, editor, author, portal_member, portal_admin)',
                 },
                 page: {
                   type: 'number',
@@ -488,10 +400,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'User ID',
-                },
+                id: { type: 'number', description: 'User ID' },
               },
               required: ['id'],
             },
@@ -502,38 +411,22 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                name: {
-                  type: 'string',
-                  description: 'Filter networks by name',
-                },
-                company_id: {
-                  type: 'number',
-                  description: 'Filter networks by company ID',
-                },
-                location_id: {
-                  type: 'number',
-                  description: 'Filter networks by location ID',
-                },
+                name: { type: 'string', description: 'Filter networks by name' },
+                company_id: { type: 'number', description: 'Filter networks by company ID' },
+                location_id: { type: 'number', description: 'Filter networks by location ID' },
                 created_at: {
                   type: 'string',
-                  description: 'Filter networks by creation date (format: start_datetime,end_datetime or exact_datetime)',
+                  description:
+                    'Filter networks by creation date (format: start_datetime,end_datetime or exact_datetime)',
                 },
                 updated_at: {
                   type: 'string',
-                  description: 'Filter networks by update date (format: start_datetime,end_datetime or exact_datetime)',
+                  description:
+                    'Filter networks by update date (format: start_datetime,end_datetime or exact_datetime)',
                 },
-                archived: {
-                  type: 'boolean',
-                  description: 'Filter networks by archive status',
-                },
-                page: {
-                  type: 'number',
-                  description: 'Page number for pagination',
-                },
-                page_size: {
-                  type: 'number',
-                  description: 'Number of results per page',
-                },
+                archived: { type: 'boolean', description: 'Filter networks by archive status' },
+                page: { type: 'number', description: 'Page number for pagination' },
+                page_size: { type: 'number', description: 'Number of results per page' },
               },
             },
           },
@@ -543,10 +436,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'Network ID',
-                },
+                id: { type: 'number', description: 'Network ID' },
               },
               required: ['id'],
             },
@@ -557,14 +447,8 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                name: {
-                  type: 'string',
-                  description: 'Filter by procedure name',
-                },
-                company_id: {
-                  type: 'number',
-                  description: 'Filter by company ID',
-                },
+                name: { type: 'string', description: 'Filter by procedure name' },
+                company_id: { type: 'number', description: 'Filter by company ID' },
                 global_template: {
                   type: 'string',
                   enum: ['true', 'false'],
@@ -601,10 +485,7 @@ class HuduMcpServer {
             inputSchema: {
               type: 'object',
               properties: {
-                id: {
-                  type: 'number',
-                  description: 'The ID of the procedure to retrieve',
-                },
+                id: { type: 'number', description: 'The ID of the procedure to retrieve' },
               },
               required: ['id'],
             },
@@ -613,46 +494,118 @@ class HuduMcpServer {
       };
     });
 
-    // Register all tools
-    registerTools(this.server, this.huduClient);
+    registerTools(server, this.huduClient);
+
+    return server;
   }
 
   private async validateApiConnection(): Promise<void> {
     try {
       console.error('Validating HUDU API connection...');
       const apiInfo = await this.huduClient.getApiInfo();
-      console.error(`✓ Connected to HUDU API successfully`);
-      console.error(`  API Version: ${apiInfo.version || 'Unknown'}`);
-      console.error(`  Base URL: ${this.config.HUDU_BASE_URL}`);
+      console.error('✓ Connected to HUDU API successfully');
+      console.error(`API Version: ${apiInfo.version || 'Unknown'}`);
+      console.error(`Base URL: ${this.config.HUDU_BASE_URL}`);
     } catch (error) {
       if (error instanceof Error) {
         if (error.message.includes('401')) {
-          throw new Error(`API key validation failed: Invalid or expired API key. Please check your HUDU_API_KEY.`);
+          throw new Error(
+            'API key validation failed: Invalid or expired API key. Please check your HUDU_API_KEY.'
+          );
         }
+
         if (error.message.includes('404') || error.message.includes('ENOTFOUND')) {
-          throw new Error(`URL validation failed: Cannot connect to ${this.config.HUDU_BASE_URL}. Please check your HUDU_BASE_URL.`);
+          throw new Error(
+            `URL validation failed: Cannot connect to ${this.config.HUDU_BASE_URL}. Please check your HUDU_BASE_URL.`
+          );
         }
+
         if (error.message.includes('403')) {
-          throw new Error(`API access denied: Your API key does not have sufficient permissions.`);
+          throw new Error(
+            'API access denied: Your API key does not have sufficient permissions.'
+          );
         }
+
         throw new Error(`API connection failed: ${error.message}`);
       }
-      throw new Error(`API connection failed: Unknown error`);
+
+      throw new Error('API connection failed: Unknown error');
     }
   }
 
   async run(): Promise<void> {
-    // Validate API connection before starting the server
     await this.validateApiConnection();
-    
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('HUDU MCP server running on stdio');
+
+    const app = express();
+    app.use(express.json({ limit: '1mb' }));
+
+    app.use('/mcp', (req: Request, res: Response, next) => {
+      console.error('Incoming headers:', JSON.stringify(req.headers));
+      const token = req.headers['x-api-key'];
+      if (token !== this.config.MCP_AUTH_TOKEN) {
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+      next();
+    });
+
+    app.get('/health', (_req: Request, res: Response) => {
+      res.status(200).json({
+        ok: true,
+        service: 'hudu-mcp',
+      });
+    });
+
+    app.all('/mcp', async (req: Request, res: Response) => {
+      try {
+        const server = this.createServer();
+
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: undefined,
+          enableJsonResponse: false,
+        });
+
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        console.error('MCP request failed:', error);
+
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32603,
+              message:
+                error instanceof Error ? error.message : 'Unknown internal server error',
+            },
+            id: null,
+          });
+        }
+      }
+    });
+
+    if (this.config.SSL_KEY_PATH && this.config.SSL_CERT_PATH) {
+      const tlsOptions = {
+        key: fs.readFileSync(this.config.SSL_KEY_PATH),
+        cert: fs.readFileSync(this.config.SSL_CERT_PATH),
+      };
+      https.createServer(tlsOptions, app).listen(this.config.PORT, this.config.HOST, () => {
+        console.error(
+          `HUDU MCP server running at https://${this.config.HOST}:${this.config.PORT}/mcp`
+        );
+      });
+    } else {
+      app.listen(this.config.PORT, this.config.HOST, () => {
+        console.error(
+          `HUDU MCP server running at http://${this.config.HOST}:${this.config.PORT}/mcp`
+        );
+      });
+    }
   }
 }
 
-// Start the server
 const server = new HuduMcpServer();
+
 server.run().catch((error) => {
   console.error('Failed to start server:', error);
   process.exit(1);
