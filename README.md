@@ -54,6 +54,32 @@ The server requires the following environment variables:
 | `PORT` | No | Port to listen on (default: `3000`) |
 | `HOST` | No | Host to bind to (default: `0.0.0.0`) |
 
+### Generating a Secure Token
+
+Before configuring the server, generate a strong random token to use as your `MCP_AUTH_TOKEN`. Do not use a short or manually typed password — use one of the methods below to generate a cryptographically secure value.
+
+**Linux / macOS (recommended):**
+```bash
+openssl rand -hex 32
+```
+
+**Linux (alternative using /dev/urandom):**
+```bash
+cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1
+```
+
+**Node.js (any platform):**
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+**PowerShell (Windows):**
+```powershell
+[System.Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+```
+
+Copy the output — this becomes your `MCP_AUTH_TOKEN`. Store it somewhere safe (e.g. a password manager) as you will need it to configure any client connecting to the server.
+
 ### Setting up Environment Variables
 
 1. Copy the example environment file:
@@ -65,7 +91,7 @@ The server requires the following environment variables:
    ```bash
    HUDU_API_KEY=your_actual_api_key_here
    HUDU_BASE_URL=https://your-company.huducloud.com
-   MCP_AUTH_TOKEN=your_secure_token_here
+   MCP_AUTH_TOKEN=your_generated_token_here
    PORT=3000
    HOST=0.0.0.0
    ```
@@ -140,6 +166,107 @@ Authorization: Bearer your_secure_token_here
 ```
 
 The token value must match the `MCP_AUTH_TOKEN` environment variable. Requests without a valid token will be rejected with a `401 Unauthorized` response.
+
+### Running Behind an Nginx Reverse Proxy (HTTPS)
+
+For production deployments, it is strongly recommended to run the MCP server behind an Nginx reverse proxy with a valid TLS certificate. This allows clients to connect securely over HTTPS on the standard port 443, without exposing the Node.js process directly to the internet.
+
+#### 1. Install Nginx
+
+```bash
+sudo apt update
+sudo apt install nginx -y
+```
+
+#### 2. Obtain a TLS Certificate with Certbot
+
+Install Certbot and obtain a free Let's Encrypt certificate for your domain:
+
+```bash
+sudo apt install certbot python3-certbot-nginx -y
+sudo certbot --nginx -d your-mcp-server.yourdomain.com
+```
+
+Certbot will automatically configure Nginx to use the certificate and set up auto-renewal.
+
+#### 3. Configure Nginx
+
+Create a new Nginx site configuration:
+
+```bash
+sudo nano /etc/nginx/sites-available/hudu-mcp
+```
+
+Paste the following, replacing `your-mcp-server.yourdomain.com` with your actual domain:
+
+```nginx
+server {
+    listen 80;
+    server_name your-mcp-server.yourdomain.com;
+
+    # Redirect all HTTP traffic to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name your-mcp-server.yourdomain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/your-mcp-server.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-mcp-server.yourdomain.com/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+
+        # Required for MCP streaming responses (SSE)
+        proxy_set_header   Connection        '';
+        proxy_buffering    off;
+        proxy_cache        off;
+        chunked_transfer_encoding on;
+    }
+}
+```
+
+#### 4. Enable the Site and Reload Nginx
+
+```bash
+sudo ln -s /etc/nginx/sites-available/hudu-mcp /etc/nginx/sites-enabled/
+sudo nginx -t        # Test the config for errors
+sudo systemctl reload nginx
+```
+
+#### 5. Allow HTTPS Through the Firewall
+
+```bash
+sudo ufw allow 'Nginx Full'
+sudo ufw delete allow 'Nginx HTTP'   # Optional: remove plain HTTP if not needed
+```
+
+Your MCP server is now accessible at `https://your-mcp-server.yourdomain.com` on port 443. The Node.js process continues to run locally on port 3000 (via PM2) and is not exposed directly.
+
+**Traffic flow:**
+```
+Client → HTTPS :443 → Nginx → HTTP :3000 → hudu-mcp (Node.js / PM2)
+```
+
+> **Note:** The MCP `Authorization: Bearer` token authentication still applies — all requests must include a valid token regardless of whether they arrive over HTTP or HTTPS. The Nginx layer adds transport security on top of the existing token auth.
+
+#### Troubleshooting Nginx
+
+```bash
+sudo nginx -t                        # Validate config syntax
+sudo systemctl status nginx          # Check Nginx status
+sudo journalctl -u nginx             # View Nginx logs
+sudo certbot renew --dry-run         # Test certificate auto-renewal
+```
 
 ### Connecting Claude Desktop to the Web Server
 
