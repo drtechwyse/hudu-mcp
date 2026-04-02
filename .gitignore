@@ -61,3 +61,5 @@ coverage/
 
 # Development files
 docs/
+.env.old
+.env
